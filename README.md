@@ -14,10 +14,6 @@
 
 ### Backend (`cinetube-backend/Dockerfile`) — 3 stage:
 
-- `deps`: pnpm install
-- `builder`: prisma generate + tsup build
-- `runner`: production এ dist/ চালায়
-
 ```dockerfile
 # ── Stage 1: deps ──
 FROM node:20-alpine AS deps
@@ -67,11 +63,7 @@ CMD ["node", "dist/server.js"]
 
 ### Frontend (`cinetube-frontend/Dockerfile`) — 3 stage:
 
-- `deps`: bun install
-- `builder`: next build
-- `runner`: standalone output serve করে
-
-⚠️ `next.config.ts` এ `output: 'standalone'` লাগবে।
+⚠️ `next.config.ts` এ `output: 'standalone'` থাকতে হবে।
 
 ```dockerfile
 # ── Stage 1: deps ──
@@ -183,6 +175,48 @@ networks:
 
 ### `nginx/nginx.conf`
 
+প্রথমে HTTP-only দিয়ে চালু করতে হবে (SSL certificate নেওয়ার আগে):
+
+```nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    server {
+        listen 80;
+        server_name cinetube.arifuddincoder.site;
+
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        location / {
+            proxy_pass http://cinetube-frontend:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /api/ {
+            proxy_pass http://cinetube-backend:5000/api/;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+```
+
+SSL certificate নেওয়ার পর এই final config দাও:
+
 ```nginx
 events {
     worker_connections 1024;
@@ -241,7 +275,9 @@ http {
 }
 ```
 
-### `.github/workflows/deploy.yml`
+### `.github/workflows/deploy.yml` (তিনটা repo তেই একই)
+
+`cinetube-devops`, `cinetube-backend`, `cinetube-frontend` — তিনটাতেই এই file দাও:
 
 ```yaml
 name: Deploy to VPS
@@ -265,6 +301,7 @@ jobs:
           script: |
             cd /opt/cinetube
             docker compose up --build -d
+            docker compose restart nginx
             docker image prune -f
 ```
 
@@ -273,7 +310,7 @@ jobs:
 ## Phase 4 — VPS Setup
 
 ```bash
-# 1. Docker install
+# 1. Docker install করো
 curl -fsSL https://get.docker.com | sh
 
 # 2. folder বানাও
@@ -289,15 +326,69 @@ scp .env root@VPS_IP:/opt/cinetube/.env
 
 ---
 
-## Phase 5 — SSL Certificate
+## Phase 5 — .env file
 
-প্রথমে HTTP-only nginx দিয়ে চালু করো (443 block ছাড়া):
+`cinetube-devops` folder এ `.env` বানাও (PC তে), তারপর VPS এ upload করো।
+
+```dotenv
+# Backend
+NODE_ENV=production
+PORT=5000
+
+DATABASE_URL=your_database_url_here
+
+BETTER_AUTH_SECRET=your_better_auth_secret_here
+BETTER_AUTH_URL=https://cinetube.arifuddincoder.site
+
+ACCESS_TOKEN_SECRET=your_access_token_secret_here
+REFRESH_TOKEN_SECRET=your_refresh_token_secret_here
+ACCESS_TOKEN_EXPIRES_IN="1d"
+REFRESH_TOKEN_EXPIRES_IN="7d"
+
+CLOUDINARY_CLOUD_NAME=your_cloudinary_cloud_name_here
+CLOUDINARY_API_KEY=your_cloudinary_api_key_here
+CLOUDINARY_API_SECRET=your_cloudinary_api_secret_here
+
+FRONTEND_URL=https://cinetube.arifuddincoder.site
+
+EMAIL_SENDER_SMTP_USER=your_email_here
+EMAIL_SENDER_SMTP_PASS=your_email_password_here
+EMAIL_SENDER_SMTP_HOST=smtp.gmail.com
+EMAIL_SENDER_SMTP_PORT=465
+EMAIL_SENDER_SMTP_FROM=your_email_here
+
+GOOGLE_CLIENT_ID=your_google_client_id_here
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here
+GOOGLE_CALLBACK_URL=https://cinetube.arifuddincoder.site/api/auth/callback/google
+
+SUPER_ADMIN_EMAIL=your_super_admin_email_here
+SUPER_ADMIN_PASSWORD=your_super_admin_password_here
+
+STRIPE_SECRET_KEY=your_stripe_secret_key_here
+STRIPE_WEBHOOK_SECRET=your_stripe_webhook_secret_here
+STRIPE_MONTHLY_PRICE_ID=your_stripe_monthly_price_id_here
+STRIPE_YEARLY_PRICE_ID=your_stripe_yearly_price_id_here
+
+# Frontend
+NEXT_PUBLIC_API_BASE_URL=https://cinetube.arifuddincoder.site/api/v1
+NEXT_PUBLIC_BACKEND_URL=https://cinetube.arifuddincoder.site
+NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME=your_cloudinary_cloud_name_here
+NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET=your_cloudinary_upload_preset_here
+```
+
+⚠️ `.env` কখনো GitHub এ push করবে না। `cinetube-devops/.gitignore` এ `.env` add করো।
+
+---
+
+## Phase 6 — SSL Certificate
+
+### Step 1: HTTP-only দিয়ে চালু করো
 
 ```bash
 docker compose up -d
 ```
 
-তারপর certificate নাও:
+### Step 2: Certificate নাও
 
 ```bash
 docker compose run --rm --entrypoint certbot certbot certonly \
@@ -306,10 +397,20 @@ docker compose run --rm --entrypoint certbot certbot certonly \
   --email তোমার@email.com \
   --agree-tos \
   --no-eff-email \
-  -d তোমার-domain.com
+  -d cinetube.arifuddincoder.site
 ```
 
-Certificate পাওয়ার পর nginx.conf এ 443 block add করো, তারপর:
+### Step 3: nginx.conf এ SSL config দাও
+
+উপরের final nginx.conf টা VPS এ দাও:
+
+```bash
+cat > /opt/cinetube/nginx/nginx.conf << 'EOF'
+# উপরের final nginx.conf content এখানে
+EOF
+```
+
+### Step 4: nginx restart করো
 
 ```bash
 docker compose restart nginx
@@ -317,27 +418,29 @@ docker compose restart nginx
 
 ---
 
-## Phase 6 — GitHub Actions Secrets
+## Phase 7 — GitHub Actions Secrets
 
-`cinetube-devops` repo → Settings → Secrets → Actions এ তিনটা secret:
+তিনটা repo তেই (`cinetube-devops`, `cinetube-backend`, `cinetube-frontend`) এই secrets add করো:
+
+**Settings → Secrets and variables → Actions → New repository secret**
 
 | Secret | Value |
 |--------|-------|
-| `VPS_HOST` | VPS IP |
+| `VPS_HOST` | VPS IP (যেমন: 81.17.101.34) |
 | `VPS_USER` | `root` |
 | `VPS_SSH_KEY` | Private SSH key |
 
-VPS এ SSH key বানাতে:
+### SSH Key বানাতে (VPS এ):
 
 ```bash
 ssh-keygen -t ed25519 -C "github-actions"
 cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
-cat ~/.ssh/id_ed25519   # এটা GitHub Secret এ দাও
+cat ~/.ssh/id_ed25519   # এই output টা VPS_SSH_KEY তে দাও
 ```
 
 ---
 
-## Phase 7 — Auto-renew Cron Job
+## Phase 8 — Auto-renew Cron Job
 
 ```bash
 crontab -e
@@ -354,13 +457,37 @@ crontab -e
 ## এরপর থেকে Workflow
 
 ```
-Code লিখবে
-    ↓
-GitHub এ push করবে
-    ↓
+Code লিখবে (backend বা frontend)
+        ↓
+git push origin main
+        ↓
 GitHub Actions trigger হবে
-    ↓
-VPS এ SSH → docker compose up --build -d
-    ↓
-নতুন version live!
+        ↓
+VPS এ SSH → docker compose up --build -d → nginx restart
+        ↓
+নতুন version live! (~3-5 মিনিট)
+```
+
+---
+
+## Useful Commands
+
+```bash
+# সব container দেখো
+docker compose ps
+
+# logs দেখো
+docker compose logs -f
+
+# একটা service এর log দেখো
+docker compose logs -f cinetube-frontend
+
+# manually deploy করো
+docker compose up --build -d
+
+# nginx restart করো
+docker compose restart nginx
+
+# সব বন্ধ করো
+docker compose down
 ```
