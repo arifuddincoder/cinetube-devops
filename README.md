@@ -490,4 +490,7 @@ docker compose restart nginx
 
 # সব বন্ধ করো
 docker compose down
+
+# env theke pora
+docker compose exec cinetube-backend env | grep BETTER_AUTH
 ```
